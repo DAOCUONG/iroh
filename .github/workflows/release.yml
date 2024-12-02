@@ -15,6 +15,19 @@ on:
         description: "Upload artifacts"
         required: true
         default: "true"
+      upload_url:
+        description: "Upload URL"
+        required: false
+        default: ""
+      base_hash:
+          description: "Commit hash from which to build"
+          required: false
+          type: string
+          default: ""
+      mark_latest:
+        description: "Mark latest release"
+        required: true
+        default: "false"
   push:
     tags:
     - "v*"
@@ -28,8 +41,8 @@ env:
   RUSTFLAGS: -Dwarnings
   RUSTDOCFLAGS: -Dwarnings
   MSRV: "1.76"
-  SCCACHE_CACHE_SIZE: "50G"
-  BIN_NAMES: "iroh,iroh-relay,iroh-dns-server"
+  SCCACHE_CACHE_SIZE: "10G"
+  BIN_NAMES: "iroh-relay,iroh-dns-server"
   RELEASE_VERSION: ${{ github.event.inputs.release_version }}
 
 jobs:
@@ -72,6 +85,9 @@ jobs:
         name: Build release binaries
         needs: create-release
         runs-on: ${{ matrix.runner }}
+        outputs:
+          release_version: ${{ needs.create-release.outputs.release_version }}
+          base_hash: ${{ steps.define_hash.outputs.base_hash }}
         continue-on-error: false
         strategy:
           fail-fast: false
@@ -97,7 +113,7 @@ jobs:
                 release-os: darwin
                 release-arch: x86_64
                 cargo_targets: "x86_64-apple-darwin"
-                runner: [self-hosted, macOS, X64]
+                runner: [self-hosted, macOS, ARM64]
               - name: macOS-arm-latest
                 os: macOS-latest
                 release-os: darwin
@@ -118,14 +134,28 @@ jobs:
           RUSTV: ${{ matrix.rust }}
         steps:
         - name: Checkout
+          if: inputs.base_hash == ''
           uses: actions/checkout@v4
           with:
+            submodules: recursive
+        
+        - name: Checkout specified commit
+          if: inputs.base_hash != ''
+          uses: actions/checkout@v4
+          with:
+            ref: ${{ inputs.base_hash }}
             submodules: recursive
     
         - name: Set build arch
           run: |
             echo "RELEASE_ARCH=${{ matrix.release-arch }}" >> $GITHUB_ENV
             echo "RELEASE_OS=${{ matrix.release-os }}" >> $GITHUB_ENV
+        
+        - name: Define hash
+          if: matrix.os == 'ubuntu-latest'
+          id: define_hash
+          run: |
+            echo "base_hash=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
         - name: Ensure musl support
           if: ${{ contains(matrix.cargo_targets, '-musl') }}
@@ -204,14 +234,12 @@ jobs:
         - name: push release
           if: matrix.os != 'windows-latest'
           run: |
-            aws s3 cp ./target/${{ matrix.cargo_targets }}/optimized-release/iroh s3://vorc/iroh-${RELEASE_OS}-${RELEASE_ARCH}-${GITHUB_SHA::7} --no-progress
             aws s3 cp ./target/${{ matrix.cargo_targets }}/optimized-release/iroh-relay s3://vorc/iroh-relay-${RELEASE_OS}-${RELEASE_ARCH}-${GITHUB_SHA::7} --no-progress
             aws s3 cp ./target/${{ matrix.cargo_targets }}/optimized-release/iroh-dns-server s3://vorc/iroh-dns-server-${RELEASE_OS}-${RELEASE_ARCH}-${GITHUB_SHA::7} --no-progress
     
         - name: push release latest
-          if: matrix.os != 'windows-latest'
+          if: matrix.os != 'windows-latest' && (github.event.inputs.mark_latest == 'true' || github.event_name == 'push')
           run: |
-            aws s3 cp ./target/${{ matrix.cargo_targets }}/optimized-release/iroh s3://vorc/iroh-${RELEASE_OS}-${RELEASE_ARCH}-latest --no-progress
             aws s3 cp ./target/${{ matrix.cargo_targets }}/optimized-release/iroh-relay s3://vorc/iroh-relay-${RELEASE_OS}-${RELEASE_ARCH}-latest --no-progress
             aws s3 cp ./target/${{ matrix.cargo_targets }}/optimized-release/iroh-dns-server s3://vorc/iroh-dns-server-${RELEASE_OS}-${RELEASE_ARCH}-latest --no-progress
 
@@ -251,5 +279,32 @@ jobs:
         - uses: n0-computer/actions-upload-release-asset@main
           if: (github.event.inputs.upload_artifacts == 'true' || github.event_name == 'push')
           with:
-            upload_url: ${{ needs.create-release.outputs.upload_url }}
+            upload_url: ${{ github.event.inputs.upload_url || needs.create-release.outputs.upload_url }}
             asset_path: ${{ env.ASSET }}
+
+        - name: attach artifacts
+          uses: actions/upload-artifact@v4
+          if : matrix.os != 'windows-latest'
+          with:
+            name: iroh-${{ matrix.release-os }}-${{ matrix.release-arch }}-bundle
+            path: iroh-*.tar.gz
+            compression-level: 0
+            retention-days: 1
+          
+        - name: attach artifacts
+          uses: actions/upload-artifact@v4
+          if : matrix.os == 'windows-latest'
+          with:
+            name: iroh-${{ matrix.release-os }}-${{ matrix.release-arch }}-bundle
+            path: iroh-*.zip
+            compression-level: 0
+            retention-days: 1
+
+    docker:
+      needs: build_release
+      uses: './.github/workflows/docker.yaml'
+      secrets: inherit
+      with:
+        release_version: ${{ needs.build_release.outputs.release_version }}
+        base_hash: ${{ needs.build_release.outputs.base_hash }}
+        publish: true

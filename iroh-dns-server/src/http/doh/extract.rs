@@ -3,6 +3,12 @@
 // This module is mostly copied from
 // https://github.com/fission-codes/fission-server/blob/394de877fad021260c69fdb1edd7bb4b2f98108c/fission-server/src/extract/doh.rs
 
+use std::{
+    fmt::{self, Display, Formatter},
+    net::SocketAddr,
+    str::FromStr,
+};
+
 use async_trait::async_trait;
 use axum::{
     extract::{ConnectInfo, FromRequest, FromRequestParts, Query},
@@ -12,18 +18,13 @@ use bytes::Bytes;
 use hickory_server::{
     authority::MessageRequest,
     proto::{
-        self,
         serialize::binary::{BinDecodable, BinDecoder, BinEncodable, BinEncoder},
+        {self},
     },
     server::{Protocol, Request as DNSRequest},
 };
 use http::{header, request::Parts, HeaderValue, StatusCode};
 use serde::Deserialize;
-use std::{
-    fmt::{self, Display, Formatter},
-    net::SocketAddr,
-    str::FromStr,
-};
 use tracing::info;
 
 use crate::http::error::AppError;
@@ -80,7 +81,7 @@ pub struct DnsQuery {
     /// Privacy setting for how your IP address is forwarded to authoritative nameservers
     #[allow(dead_code)]
     pub edns_client_subnet: Option<String>,
-    /// Some url-safe random characters to pad your messages for privacy (to avoid being fingerprinted by encrytped message length)
+    /// Some url-safe random characters to pad your messages for privacy (to avoid being fingerprinted by encrypted message length)
     #[allow(dead_code)]
     pub random_padding: Option<String>,
     /// Whether to provide answers for all records up to the root

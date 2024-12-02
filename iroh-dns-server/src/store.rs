@@ -7,17 +7,16 @@ use hickory_proto::rr::{Name, RecordSet, RecordType, RrKey};
 use iroh_metrics::inc;
 use lru::LruCache;
 use parking_lot::Mutex;
-use pkarr::{PkarrClient, SignedPacket};
+use pkarr::{mainline::dht::DhtSettings, PkarrClient, SignedPacket};
 use tracing::{debug, trace};
 use ttl_cache::TtlCache;
 
+use self::signed_packets::SignedPacketStore;
 use crate::{
     config::BootstrapOption,
     metrics::Metrics,
     util::{signed_packet_to_hickory_records_without_origin, PublicKeyBytes},
 };
-
-use self::signed_packets::SignedPacketStore;
 
 mod signed_packets;
 
@@ -56,7 +55,7 @@ impl ZoneStore {
         Ok(Self::new(packet_store))
     }
 
-    /// Configure a pkarr client for resolution of packets from the bittorent mainline DHT.
+    /// Configure a pkarr client for resolution of packets from the bittorrent mainline DHT.
     ///
     /// This will be used only as a fallback if there is no local info available.
     ///
@@ -64,10 +63,14 @@ impl ZoneStore {
     /// mainline bootstrap nodes.
     pub fn with_mainline_fallback(self, bootstrap: BootstrapOption) -> Self {
         let pkarr_client = match bootstrap {
-            BootstrapOption::Default => PkarrClient::default(),
-            BootstrapOption::Custom(bootstrap) => {
-                PkarrClient::builder().bootstrap(&bootstrap).build()
-            }
+            BootstrapOption::Default => PkarrClient::builder().build().unwrap(),
+            BootstrapOption::Custom(bootstrap) => PkarrClient::builder()
+                .dht_settings(DhtSettings {
+                    bootstrap: Some(bootstrap),
+                    ..Default::default()
+                })
+                .build()
+                .unwrap(),
         };
         Self {
             pkarr: Some(Arc::new(pkarr_client)),
@@ -106,12 +109,12 @@ impl ZoneStore {
         };
 
         if let Some(pkarr) = self.pkarr.as_ref() {
-            let key = pkarr::PublicKey::try_from(*pubkey.as_bytes()).expect("valid public key");
+            let key = pkarr::PublicKey::try_from(pubkey.as_bytes()).expect("valid public key");
             // use the more expensive `resolve_most_recent` here.
             //
             // it will be cached for some time.
             debug!("DHT resolve {}", key.to_z32());
-            let packet_opt = pkarr.as_ref().resolve_most_recent(key).await;
+            let packet_opt = pkarr.as_ref().clone().as_async().resolve(&key).await?;
             if let Some(packet) = packet_opt {
                 debug!("DHT resolve successful {:?}", packet.packet());
                 return self
@@ -243,12 +246,12 @@ impl CachedZone {
             signed_packet_to_hickory_records_without_origin(signed_packet, |_| true)?;
         Ok(Self {
             records,
-            timestamp: *signed_packet.timestamp(),
+            timestamp: signed_packet.timestamp(),
         })
     }
 
     fn is_newer_than(&self, signed_packet: &SignedPacket) -> bool {
-        self.timestamp > *signed_packet.timestamp()
+        self.timestamp > signed_packet.timestamp()
     }
 
     fn resolve(&self, name: &Name, record_type: RecordType) -> Option<Arc<RecordSet>> {

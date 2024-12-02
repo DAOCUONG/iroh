@@ -74,20 +74,15 @@ impl<I: AsyncRead + AsyncWrite + Unpin + Send + 'static, S: Send + 'static> Acce
 
 impl TlsAcceptor {
     async fn self_signed(domains: Vec<String>) -> Result<Self> {
-        let tls_cert = rcgen::generate_simple_self_signed(domains)?;
-        let config = RustlsConfig::from_der(
-            vec![tls_cert.serialize_der()?],
-            tls_cert.serialize_private_key_der(),
-        )
-        .await?;
+        let rcgen::CertifiedKey { cert, key_pair } = rcgen::generate_simple_self_signed(domains)?;
+        let config =
+            RustlsConfig::from_der(vec![cert.der().to_vec()], key_pair.serialize_der()).await?;
         let acceptor = RustlsAcceptor::new(config);
         Ok(Self::Manual(acceptor))
     }
 
     async fn manual(domains: Vec<String>, dir: PathBuf) -> Result<Self> {
-        let config = rustls::ServerConfig::builder()
-            .with_safe_defaults()
-            .with_no_client_auth();
+        let config = rustls::ServerConfig::builder().with_no_client_auth();
         if domains.len() != 1 {
             bail!("Multiple domains in manual mode are not supported");
         }
@@ -95,12 +90,8 @@ impl TlsAcceptor {
         let cert_path = dir.join(format!("{keyname}.crt"));
         let key_path = dir.join(format!("{keyname}.key"));
 
-        let (certs, secret_key) = tokio::task::spawn_blocking(move || {
-            let certs = load_certs(cert_path)?;
-            let key = load_secret_key(key_path)?;
-            anyhow::Ok((certs, key))
-        })
-        .await??;
+        let certs = load_certs(cert_path).await?;
+        let secret_key = load_secret_key(key_path).await?;
 
         let config = config.with_single_cert(certs, secret_key)?;
         let config = RustlsConfig::from_config(Arc::new(config));
@@ -114,9 +105,7 @@ impl TlsAcceptor {
         is_production: bool,
         dir: PathBuf,
     ) -> Result<Self> {
-        let config = rustls::ServerConfig::builder()
-            .with_safe_defaults()
-            .with_no_client_auth();
+        let config = rustls::ServerConfig::builder().with_no_client_auth();
         let mut state = AcmeConfig::new(domains)
             .contact([format!("mailto:{contact}")])
             .cache_option(Some(DirCache::new(dir)))
@@ -143,27 +132,38 @@ impl TlsAcceptor {
     }
 }
 
-fn load_certs(filename: impl AsRef<Path>) -> Result<Vec<rustls::Certificate>> {
-    let certfile = std::fs::File::open(filename).context("cannot open certificate file")?;
-    let mut reader = std::io::BufReader::new(certfile);
-
-    let certs = rustls_pemfile::certs(&mut reader)?
-        .iter()
-        .map(|v| rustls::Certificate(v.clone()))
-        .collect();
+async fn load_certs(
+    filename: impl AsRef<Path>,
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let certfile = tokio::fs::read(filename)
+        .await
+        .context("cannot open certificate file")?;
+    let mut reader = std::io::Cursor::new(certfile);
+    let certs: Result<Vec<_>, std::io::Error> = rustls_pemfile::certs(&mut reader).collect();
+    let certs = certs?;
 
     Ok(certs)
 }
 
-fn load_secret_key(filename: impl AsRef<Path>) -> Result<rustls::PrivateKey> {
-    let keyfile = std::fs::File::open(filename.as_ref()).context("cannot open secret key file")?;
-    let mut reader = std::io::BufReader::new(keyfile);
+async fn load_secret_key(
+    filename: impl AsRef<Path>,
+) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
+    let keyfile = tokio::fs::read(filename.as_ref())
+        .await
+        .context("cannot open secret key file")?;
+    let mut reader = std::io::Cursor::new(keyfile);
 
     loop {
         match rustls_pemfile::read_one(&mut reader).context("cannot parse secret key .pem file")? {
-            Some(rustls_pemfile::Item::RSAKey(key)) => return Ok(rustls::PrivateKey(key)),
-            Some(rustls_pemfile::Item::PKCS8Key(key)) => return Ok(rustls::PrivateKey(key)),
-            Some(rustls_pemfile::Item::ECKey(key)) => return Ok(rustls::PrivateKey(key)),
+            Some(rustls_pemfile::Item::Pkcs1Key(key)) => {
+                return Ok(rustls::pki_types::PrivateKeyDer::Pkcs1(key));
+            }
+            Some(rustls_pemfile::Item::Pkcs8Key(key)) => {
+                return Ok(rustls::pki_types::PrivateKeyDer::Pkcs8(key));
+            }
+            Some(rustls_pemfile::Item::Sec1Key(key)) => {
+                return Ok(rustls::pki_types::PrivateKeyDer::Sec1(key));
+            }
             None => break,
             _ => {}
         }

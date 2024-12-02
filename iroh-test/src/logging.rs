@@ -2,9 +2,11 @@
 
 use tokio::runtime::RuntimeFlavor;
 use tracing::level_filters::LevelFilter;
-use tracing_subscriber::layer::{Layer, SubscriberExt};
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{
+    layer::{Layer, SubscriberExt},
+    util::SubscriberInitExt,
+    EnvFilter,
+};
 
 /// Configures logging for the current test, **single-threaded runtime only**.
 ///
@@ -25,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 ///     let _guard = iroh_test::logging::setup();
 ///     assert!(true);
 /// }
+/// ```
 #[must_use = "The tracing guard must only be dropped at the end of the test"]
 pub fn setup() -> tracing::subscriber::DefaultGuard {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
